@@ -100,9 +100,9 @@ extern stella_object the_FALSE;
 extern stella_object the_TRUE;
 
 /** The bitmask for the fields count. */
-const int FIELD_COUNT_MASK;
+extern const int FIELD_COUNT_MASK;
 
 /** The bitmask for the Stella object tag. */
-const int TAG_MASK;
+extern const int TAG_MASK;
 
 #endif

@@ -17,7 +17,7 @@ size_t max_allocated_objects = 0;
 int total_reads = 0;
 int total_writes = 0;
 
-#define MAX_GC_ROOTS (16 * 10)
+#define MAX_GC_ROOTS 1024
 #define MAX_ALLOC_SIZE (16 * 1000)
 #define GC_GEN_COUNT 2
 

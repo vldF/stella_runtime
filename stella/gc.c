@@ -19,7 +19,7 @@ int total_reads = 0;
 int total_writes = 0;
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (16 * 256)
+#define MAX_ALLOC_SIZE (16 * 512)
 #define GC_GEN_COUNT 2
 
 //#define DISABLE_GC

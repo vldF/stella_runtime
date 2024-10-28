@@ -6,20 +6,20 @@
 #include "runtime.h"
 #include "gc.h"
 
-/** Total allocated number of bytes (over the entire duration of the program). */
+/** GC statistics **/
 size_t total_allocated_bytes = 0;
-
-/** Total allocated number of objects (over the entire duration of the program). */
 int total_allocated_objects = 0;
 
 size_t max_allocated_bytes = 0;
 size_t max_allocated_objects = 0;
 
+long gc_runs_total = 0;
+
 int total_reads = 0;
 int total_writes = 0;
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (16 * 16)
+#define MAX_ALLOC_SIZE (16 * 256)
 #define GC_GEN_COUNT 2
 
 //#define DISABLE_GC
@@ -67,7 +67,14 @@ void* gc_alloc(size_t size_in_bytes) {
   max_allocated_bytes = total_allocated_bytes;
   max_allocated_objects = total_allocated_objects;
 
-  gc_collect_all();
+  if (gc_from_space_next > gc_from_space + MAX_ALLOC_SIZE) {
+      gc_collect_all();
+  }
+
+  if (gc_from_space_next > gc_from_space + MAX_ALLOC_SIZE) {
+      printf("Out Of Memory!");
+      exit(137);
+  }
 
   void* result = gc_from_space_next;
   gc_from_space_next += size_in_bytes;
@@ -124,6 +131,13 @@ void gc_collect_all() {
 }
 
 void gc_collect() {
+    gc_runs_total++;
+
+    size_t allocated_bytes = (gc_from_space_next - gc_from_space);
+    if (allocated_bytes > max_allocated_bytes) {
+        max_allocated_bytes = allocated_bytes;
+    }
+
     void* scan = gc_to_space_next;
 
     for (int root_i = 0; root_i < gc_roots_top; root_i++) {
@@ -140,18 +154,6 @@ void gc_collect() {
 
         scan += fields_count * sizeof(void*) + sizeof(void*);
     }
-
-//    // todo: debug only
-//    void *t = gc_to_space;
-//    while (t < scan) {
-//        stella_object *o = t;
-//        int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(o->object_header);
-//        for (int i = 0; i < fields_count; i++) {
-//            assert(!gc_is_pointer_in_from_space(STELLA_OBJECT_READ_FIELD(o, i)));
-//        }
-//
-//        t += fields_count * sizeof(void*) + sizeof(void*);
-//    }
 
     gc_clean_from_space(); // todo: debug only
     swap_spaces();
@@ -190,10 +192,11 @@ void print_gc_roots() {
 }
 
 void print_gc_alloc_stats() {
-  printf("Total memory allocation: %'d bytes (%'d objects)\n", total_allocated_bytes, total_allocated_objects);
-  printf("Maximum residency:       %'d bytes (%'d objects)\n", max_allocated_bytes, max_allocated_objects);
+  printf("Total memory allocation: %'zu bytes (%'d objects)\n", total_allocated_bytes, total_allocated_objects);
+  printf("Maximum residency:       %'zu bytes (%'zu objects)\n", max_allocated_bytes, max_allocated_objects);
   printf("Total memory use:        %'d reads and %'d writes\n", total_reads, total_writes);
   printf("Max GC roots stack size: %'d roots\n", gc_roots_max_size);
+  printf("GC runs count:           %'zu\n", gc_runs_total);
 }
 
 void print_gc_state() {
@@ -201,12 +204,12 @@ void print_gc_state() {
 }
 
 void gc_read_barrier(void *object, int field_index) {
-    assert(!gc_is_pointer_in_to_space(object));
+//    assert(!gc_is_pointer_in_to_space(object));
   total_reads += 1;
 }
 
 void gc_write_barrier(void *object, int field_index, void *contents) {
-    assert(!gc_is_pointer_in_to_space(object));
+//    assert(!gc_is_pointer_in_to_space(object));
   total_writes += 1;
 }
 

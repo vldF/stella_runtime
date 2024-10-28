@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <assert.h>
 
 #include "runtime.h"
 #include "gc.h"
@@ -18,7 +19,7 @@ int total_reads = 0;
 int total_writes = 0;
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (16 * 1000)
+#define MAX_ALLOC_SIZE (16 * 16)
 #define GC_GEN_COUNT 2
 
 //#define DISABLE_GC
@@ -26,14 +27,11 @@ int total_writes = 0;
 int gc_roots_max_size = 0;
 int gc_roots_top = 0;
 void **gc_roots[MAX_GC_ROOTS];
-void *gc_arena;
 
-void* to_space_start[GC_GEN_COUNT];
-void* from_space_start[GC_GEN_COUNT];
-
-void* gc_next;
-void *alloc_next;
-int gc_current_gen;
+void *gc_from_space;
+void *gc_from_space_next;
+void *gc_to_space;
+void *gc_to_space_next;
 
 void gc_chase(stella_object *ptr);
 void gc_collect();
@@ -56,20 +54,12 @@ void* gc_alloc(size_t size_in_bytes) {
 
 #ifndef DISABLE_GC
 void* gc_alloc(size_t size_in_bytes) {
-    if (gc_arena == NULL) {
-        gc_arena = malloc(MAX_ALLOC_SIZE * GC_GEN_COUNT);
+    if (gc_from_space_next == NULL) {
+        gc_from_space = malloc(MAX_ALLOC_SIZE * 2);
+        gc_from_space_next = gc_from_space;
 
-        alloc_next = gc_arena;
-
-        int gen_half_size = MAX_ALLOC_SIZE / 2;
-
-        from_space_start[0] = gc_arena;
-        to_space_start[0] = gc_arena + gen_half_size;
-
-        for (int i = 1; i < GC_GEN_COUNT; i++) {
-            from_space_start[i] = from_space_start[i-1] + MAX_ALLOC_SIZE;
-            to_space_start[i] = to_space_start[i-1] + MAX_ALLOC_SIZE;
-        }
+        gc_to_space = gc_from_space + MAX_ALLOC_SIZE;
+        gc_to_space_next = gc_to_space;
     }
 
   total_allocated_bytes += size_in_bytes;
@@ -79,8 +69,8 @@ void* gc_alloc(size_t size_in_bytes) {
 
   gc_collect_all();
 
-  void* result = alloc_next;
-  alloc_next += size_in_bytes;
+  void* result = gc_from_space_next;
+  gc_from_space_next += size_in_bytes;
 
   return result;
 }
@@ -88,27 +78,32 @@ void* gc_alloc(size_t size_in_bytes) {
 
 
 void* gc_forward(stella_object* ptr) {
-    void *possibleNewObjectAddress = ptr->object_fields[0];
-    if (gc_is_pointer_in_to_space(possibleNewObjectAddress)) {
-        return possibleNewObjectAddress;
-    } else {
-        gc_chase(ptr);
-        return ptr->object_fields[0];
+    if (gc_is_pointer_in_from_space(ptr)) {
+        void *possibleNewObjectAddress = ptr->object_fields[0];
+        if (gc_is_pointer_in_to_space(possibleNewObjectAddress)) {
+            return possibleNewObjectAddress;
+        } else {
+            gc_chase(ptr);
+            assert(gc_is_pointer_in_to_space(ptr->object_fields[0]));
+            return ptr->object_fields[0];
+        }
     }
+
+    return ptr;
 }
 
 void gc_chase(stella_object *ptr) {
     do {
-        stella_object *q = gc_next;
+        stella_object *q = gc_to_space_next;
         int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(ptr->object_header);
-        gc_next += fields_count * sizeof(void*) + sizeof(void *); // todo
+        gc_to_space_next += fields_count * sizeof(void*) + sizeof(void *); // todo
         void *r = NULL;
 
         q->object_header = ptr->object_header;
         for (int i = 0; i < fields_count; i++) {
             q->object_fields[i] = ptr->object_fields[i];
 
-            stella_object *potentially_forwarded = (stella_object *) (q->object_fields[i]);
+            stella_object *potentially_forwarded = q->object_fields[i];
             if (gc_is_pointer_in_from_space(q->object_fields[i])
                     && !gc_is_pointer_in_to_space(potentially_forwarded->object_fields[0])) {
                 r = potentially_forwarded;
@@ -121,24 +116,22 @@ void gc_chase(stella_object *ptr) {
 }
 
 void gc_collect_all() {
-    for (int i = 0; i < GC_GEN_COUNT; i++) {
-        gc_current_gen = i;
-        gc_collect();
-    }
+    gc_collect();
 
-    alloc_next = from_space_start[0]; // todo
+    for (int i = 0; i < gc_roots_top; i++) {
+        assert(!gc_is_pointer_in_to_space(*gc_roots[i]));
+    }
 }
 
 void gc_collect() {
-    gc_next = to_space_start[gc_current_gen];
-    void* scan = gc_next;
+    void* scan = gc_to_space_next;
 
     for (int root_i = 0; root_i < gc_roots_top; root_i++) {
         void **root_ptr = gc_roots[root_i];
         *root_ptr = gc_forward(*root_ptr);
     }
 
-    while (scan < gc_next) {
+    while (scan < gc_to_space_next) {
         stella_object *obj = scan;
         int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
         for (int field_i = 0; field_i < fields_count; field_i++) {
@@ -148,27 +141,41 @@ void gc_collect() {
         scan += fields_count * sizeof(void*) + sizeof(void*);
     }
 
+//    // todo: debug only
+//    void *t = gc_to_space;
+//    while (t < scan) {
+//        stella_object *o = t;
+//        int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(o->object_header);
+//        for (int i = 0; i < fields_count; i++) {
+//            assert(!gc_is_pointer_in_from_space(STELLA_OBJECT_READ_FIELD(o, i)));
+//        }
+//
+//        t += fields_count * sizeof(void*) + sizeof(void*);
+//    }
+
     gc_clean_from_space(); // todo: debug only
     swap_spaces();
 }
 
 bool gc_is_pointer_in_to_space(void* ptr) {
-    return ptr >= to_space_start[gc_current_gen] && ptr < (to_space_start[gc_current_gen] + MAX_ALLOC_SIZE / 2);
+    return ptr >= gc_to_space && ptr < (gc_to_space + MAX_ALLOC_SIZE);
 }
 
 bool gc_is_pointer_in_from_space(void* ptr) {
-    return ptr >= from_space_start[gc_current_gen] && ptr < (from_space_start[gc_current_gen] + MAX_ALLOC_SIZE / 2);
+    return ptr >= gc_from_space && ptr < (gc_from_space + MAX_ALLOC_SIZE);
 }
 
 void swap_spaces() {
-    void* tmp = from_space_start[gc_current_gen];
-    from_space_start[gc_current_gen] = to_space_start[gc_current_gen];
-    to_space_start[gc_current_gen] = tmp;
+    void* tmp = gc_from_space;
+    gc_from_space = gc_to_space;
+    gc_to_space = tmp;
+
+    gc_from_space_next = gc_to_space_next;
+    gc_to_space_next = gc_to_space;
 }
 
 void gc_clean_from_space() {
-    void *from_start = from_space_start[gc_current_gen];
-    for (void* i = from_start; i < from_start + MAX_ALLOC_SIZE / 2; i++) {
+    for (void* i = gc_from_space; i < gc_from_space + MAX_ALLOC_SIZE; i++) {
         *(char *)i = 0;
     }
 }
@@ -194,10 +201,12 @@ void print_gc_state() {
 }
 
 void gc_read_barrier(void *object, int field_index) {
+    assert(!gc_is_pointer_in_to_space(object));
   total_reads += 1;
 }
 
 void gc_write_barrier(void *object, int field_index, void *contents) {
+    assert(!gc_is_pointer_in_to_space(object));
   total_writes += 1;
 }
 

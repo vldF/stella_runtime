@@ -50,6 +50,7 @@ typedef struct {
 
 /** An enumeration of possible Stella object tags. */
 enum TAG {
+  TAG_UNINITIALIZED,
   TAG_ZERO,   /**< 0       : Nat */
   TAG_SUCC,   /**< succ(_) : Nat */
   TAG_FALSE,  /**< false   : Bool */

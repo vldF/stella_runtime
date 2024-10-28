@@ -54,6 +54,12 @@ int stella_object_to_nat(stella_object* obj) {
     obj = STELLA_OBJECT_SUCC_ARG(obj);
     result += 1;
   }
+
+  if (STELLA_OBJECT_HEADER_TAG(obj->object_header) == TAG_UNINITIALIZED) {
+      printf("uninitialized!");
+//      exit(1);
+  }
+
   return result;
 }
 
@@ -81,9 +87,11 @@ stella_object* stella_object_nat_rec(stella_object* n, stella_object* z, stella_
 }
 
 void print_stella_object(stella_object* obj) {
-  // printf("[%d]", STELLA_OBJECT_HEADER_TAG(obj->object_header));
   int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
   switch (STELLA_OBJECT_HEADER_TAG(obj->object_header)) {
+    case TAG_UNINITIALIZED:
+      printf("uninitialized memory access!");
+      return;
     case TAG_ZERO:
       printf("0");
       return;

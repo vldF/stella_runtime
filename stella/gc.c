@@ -19,8 +19,8 @@ int total_reads = 0;
 int total_writes = 0;
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (16 * 512)
-#define GC_GEN_COUNT 10
+#define MAX_ALLOC_SIZE (16 * 160)
+#define GC_GEN_COUNT 4
 
 //#define DISABLE_GC
 
@@ -32,13 +32,14 @@ void *gc_from_space;
 void *gc_to_space;
 void *gc_to_space_next;
 
-void *alloc_next;
-
 void *gc_generations[GC_GEN_COUNT];
+void *gc_last_gen_alternative;
+void *gc_generations_next[GC_GEN_COUNT];
 
 void gc_chase(stella_object *ptr);
 void gc_collect();
 void gc_collect_all();
+void gc_collect_last_gen();
 void gc_clean_from_space();
 bool gc_is_pointer_in_to_space(void* ptr);
 bool gc_is_pointer_in_from_space(void* ptr);
@@ -57,14 +58,15 @@ void* gc_alloc(size_t size_in_bytes) {
 #ifndef DISABLE_GC
 void* gc_alloc(size_t size_in_bytes) {
     if (gc_generations[0] == NULL) {
-        size_t arena_size = MAX_ALLOC_SIZE * GC_GEN_COUNT;
+        size_t arena_size = MAX_ALLOC_SIZE * (GC_GEN_COUNT + 1); // +1 is for the last generation that is doubled
         void *arena = malloc(arena_size);
 
         for (size_t i = 0; i < GC_GEN_COUNT; i++) {
             gc_generations[i] = arena + i * MAX_ALLOC_SIZE;
+            gc_generations_next[i] = gc_generations[i];
         }
 
-        alloc_next = gc_generations[0];
+        gc_last_gen_alternative = malloc(MAX_ALLOC_SIZE * 2); // the last on is doubled
     }
 
   total_allocated_bytes += size_in_bytes;
@@ -72,33 +74,52 @@ void* gc_alloc(size_t size_in_bytes) {
   max_allocated_bytes = total_allocated_bytes;
   max_allocated_objects = total_allocated_objects;
 
-  if (alloc_next > gc_from_space + MAX_ALLOC_SIZE) {
+  if (gc_generations_next[0] > gc_from_space + MAX_ALLOC_SIZE) {
       gc_collect_all();
   }
 
-  if (alloc_next > gc_from_space + MAX_ALLOC_SIZE) {
+  if (gc_generations_next[0] > gc_from_space + MAX_ALLOC_SIZE) {
       printf("Out Of Memory!");
       exit(137);
   }
 
-  void* result = alloc_next;
-  alloc_next += size_in_bytes;
+  void* result = gc_generations_next[0];
+  gc_generations_next[0] += size_in_bytes;
 
   return result;
 }
 #endif
 
 void gc_collect_all() {
+    gc_collect_last_gen();
+
     for (int i = 0; i < GC_GEN_COUNT-1; i++) {
         gc_from_space = gc_generations[i];
-        gc_to_space = gc_generations[i+1];
+        gc_to_space = gc_generations_next[i+1];
 
         gc_collect();
+
+        gc_generations_next[i] = gc_generations[i];
     }
 
     for (int i = 0; i < gc_roots_top; i++) {
         assert(!gc_is_pointer_in_to_space(*gc_roots[i]));
     }
+}
+
+void gc_collect_last_gen() {
+    int gen_idx = GC_GEN_COUNT - 1;
+    void *last_gen_start = gc_generations[gen_idx];
+
+    gc_from_space = last_gen_start;
+    gc_to_space = gc_last_gen_alternative;
+
+    gc_collect();
+    
+    gc_generations_next[gen_idx] = gc_to_space_next;
+
+    gc_generations[gen_idx] = gc_last_gen_alternative;
+    gc_last_gen_alternative = last_gen_start;
 }
 
 

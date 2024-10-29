@@ -20,7 +20,7 @@ int total_writes = 0;
 
 #define MAX_GC_ROOTS 1024
 #define MAX_ALLOC_SIZE (16 * 512)
-#define GC_GEN_COUNT 2
+#define GC_GEN_COUNT 10
 
 //#define DISABLE_GC
 
@@ -29,9 +29,12 @@ int gc_roots_top = 0;
 void **gc_roots[MAX_GC_ROOTS];
 
 void *gc_from_space;
-void *gc_from_space_next;
 void *gc_to_space;
 void *gc_to_space_next;
+
+void *alloc_next;
+
+void *gc_generations[GC_GEN_COUNT];
 
 void gc_chase(stella_object *ptr);
 void gc_collect();
@@ -39,7 +42,6 @@ void gc_collect_all();
 void gc_clean_from_space();
 bool gc_is_pointer_in_to_space(void* ptr);
 bool gc_is_pointer_in_from_space(void* ptr);
-void swap_spaces();
 
 #ifdef DISABLE_GC
 void* gc_alloc(size_t size_in_bytes) {
@@ -54,12 +56,15 @@ void* gc_alloc(size_t size_in_bytes) {
 
 #ifndef DISABLE_GC
 void* gc_alloc(size_t size_in_bytes) {
-    if (gc_from_space_next == NULL) {
-        gc_from_space = malloc(MAX_ALLOC_SIZE * 2);
-        gc_from_space_next = gc_from_space;
+    if (gc_generations[0] == NULL) {
+        size_t arena_size = MAX_ALLOC_SIZE * GC_GEN_COUNT;
+        void *arena = malloc(arena_size);
 
-        gc_to_space = gc_from_space + MAX_ALLOC_SIZE;
-        gc_to_space_next = gc_to_space;
+        for (size_t i = 0; i < GC_GEN_COUNT; i++) {
+            gc_generations[i] = arena + i * MAX_ALLOC_SIZE;
+        }
+
+        alloc_next = gc_generations[0];
     }
 
   total_allocated_bytes += size_in_bytes;
@@ -67,21 +72,34 @@ void* gc_alloc(size_t size_in_bytes) {
   max_allocated_bytes = total_allocated_bytes;
   max_allocated_objects = total_allocated_objects;
 
-  if (gc_from_space_next > gc_from_space + MAX_ALLOC_SIZE) {
+  if (alloc_next > gc_from_space + MAX_ALLOC_SIZE) {
       gc_collect_all();
   }
 
-  if (gc_from_space_next > gc_from_space + MAX_ALLOC_SIZE) {
+  if (alloc_next > gc_from_space + MAX_ALLOC_SIZE) {
       printf("Out Of Memory!");
       exit(137);
   }
 
-  void* result = gc_from_space_next;
-  gc_from_space_next += size_in_bytes;
+  void* result = alloc_next;
+  alloc_next += size_in_bytes;
 
   return result;
 }
 #endif
+
+void gc_collect_all() {
+    for (int i = 0; i < GC_GEN_COUNT-1; i++) {
+        gc_from_space = gc_generations[i];
+        gc_to_space = gc_generations[i+1];
+
+        gc_collect();
+    }
+
+    for (int i = 0; i < gc_roots_top; i++) {
+        assert(!gc_is_pointer_in_to_space(*gc_roots[i]));
+    }
+}
 
 
 void* gc_forward(stella_object* ptr) {
@@ -122,23 +140,15 @@ void gc_chase(stella_object *ptr) {
     } while(ptr != NULL);
 }
 
-void gc_collect_all() {
-    gc_collect();
-
-    for (int i = 0; i < gc_roots_top; i++) {
-        assert(!gc_is_pointer_in_to_space(*gc_roots[i]));
-    }
-}
-
 void gc_collect() {
     gc_runs_total++;
 
-    size_t allocated_bytes = (gc_from_space_next - gc_from_space);
-    if (allocated_bytes > max_allocated_bytes) {
-        max_allocated_bytes = allocated_bytes;
-    }
+//    size_t allocated_bytes = (gc_from_space_next - gc_from_space);
+//    if (allocated_bytes > max_allocated_bytes) {
+//        max_allocated_bytes = allocated_bytes;
+//    }
 
-    void* scan = gc_to_space_next;
+    void* scan = gc_to_space;
 
     for (int root_i = 0; root_i < gc_roots_top; root_i++) {
         void **root_ptr = gc_roots[root_i];
@@ -156,7 +166,6 @@ void gc_collect() {
     }
 
     gc_clean_from_space(); // todo: debug only
-    swap_spaces();
 }
 
 bool gc_is_pointer_in_to_space(void* ptr) {
@@ -165,15 +174,6 @@ bool gc_is_pointer_in_to_space(void* ptr) {
 
 bool gc_is_pointer_in_from_space(void* ptr) {
     return ptr >= gc_from_space && ptr < (gc_from_space + MAX_ALLOC_SIZE);
-}
-
-void swap_spaces() {
-    void* tmp = gc_from_space;
-    gc_from_space = gc_to_space;
-    gc_to_space = tmp;
-
-    gc_from_space_next = gc_to_space_next;
-    gc_to_space_next = gc_to_space;
 }
 
 void gc_clean_from_space() {

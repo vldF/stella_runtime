@@ -29,9 +29,9 @@ typedef struct {
 #define STELLA_OBJECT_SUCC_ARG(obj) STELLA_OBJECT_READ_FIELD(obj,0)
 
 /** Initialize new Stella object's TAG. */
-#define STELLA_OBJECT_INIT_TAG(obj, tag) (obj->object_header = ((obj->object_header >> 4) << 4) | tag)
+#define STELLA_OBJECT_INIT_TAG(obj, tag) (obj->object_header = ((obj->object_header & ~((1 << 4) - 1)) | tag))
 /** Initialize new Stella object's fields count. */
-#define STELLA_OBJECT_INIT_FIELDS_COUNT(obj, count) (obj->object_header = ((obj->object_header >> 8) << 8) | STELLA_OBJECT_HEADER_TAG(obj->object_header) | count << 4)
+#define STELLA_OBJECT_INIT_FIELDS_COUNT(obj, count) (obj->object_header = ((obj->object_header & ~(((1 << 4) - 1) << 4)) | count << 4))
 /** Initialize new Stella object's field. */
 #define STELLA_OBJECT_INIT_FIELD(obj, i, x) (obj->object_fields[i] = (void*)x)
 
@@ -50,7 +50,6 @@ typedef struct {
 
 /** An enumeration of possible Stella object tags. */
 enum TAG {
-  TAG_UNINITIALIZED,
   TAG_ZERO,   /**< 0       : Nat */
   TAG_SUCC,   /**< succ(_) : Nat */
   TAG_FALSE,  /**< false   : Bool */

@@ -36,6 +36,8 @@ bool has_enough_space(const struct gc_space space, const size_t requested_size) 
 #define MAX_GC_ROOTS 1024
 #define MAX_ALLOC_SIZE (16 * 100)
 
+#define max(x,y) (((x) >= (y)) ? (x) : (y))
+
 // for debug and testing
 //#define DISABLE_GC
 
@@ -61,7 +63,7 @@ struct gc_gen_descriptor gc_generations[GC_GEN_COUNT];
 bool was_heap_allocated = false;
 
 void* gc_forward(struct gc_gen_descriptor gen, gc_object *ptr);
-void gc_chase(struct gc_gen_descriptor gen, gc_object *ptr);
+bool gc_chase(struct gc_gen_descriptor gen, gc_object *ptr);
 void gc_collect(struct gc_gen_descriptor gen);
 void gc_collect_all();
 void gc_clean_space(struct gc_space);
@@ -160,7 +162,17 @@ void* gc_forward(struct gc_gen_descriptor gen, gc_object *ptr) {
         if (gc_is_pointer_in_space(gen.to, possibleNewObjectAddress)) {
             return possibleNewObjectAddress;
         } else {
-            gc_chase(gen, ptr);
+            bool result = gc_chase(gen, ptr);
+            if (!result) {
+              gc_collect(gc_generations[1]);
+              result = gc_chase(gen, ptr);
+            }
+
+            if (!result) {
+              printf("out of memory");
+              exit(137);
+            }
+
             assert(gc_is_pointer_in_space(gen.to, possibleNewObjectAddress));
             return ptr->obj.object_fields[0];
         }
@@ -169,10 +181,12 @@ void* gc_forward(struct gc_gen_descriptor gen, gc_object *ptr) {
     return ptr;
 }
 
-void gc_chase(struct gc_gen_descriptor gen, gc_object *ptr) {
+bool gc_chase(struct gc_gen_descriptor gen, gc_object *ptr) {
     do {
         struct gc_object *q = try_alloc_in_space(gen.to, gc_obj_size(ptr));
-        // todo: check q for NULL here
+        if (q == NULL) {
+          return false;
+        }
 
         int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(ptr->obj.object_header);
         void *r = NULL;
@@ -193,6 +207,8 @@ void gc_chase(struct gc_gen_descriptor gen, gc_object *ptr) {
         ptr->new_ptr = q;
         ptr = r;
     } while(ptr != NULL);
+
+    return true;
 }
 
 void gc_collect(struct gc_gen_descriptor gen) {

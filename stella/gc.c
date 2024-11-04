@@ -19,14 +19,17 @@ int total_reads = 0;
 int total_writes = 0;
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (16 * 160)
-#define GC_GEN_COUNT 4
+#define MAX_ALLOC_SIZE (16 * 200)
+#define GC_GEN_COUNT 2
+// +1 is for the last generation that is doubled
 
 //#define DISABLE_GC
 
 int gc_roots_max_size = 0;
 int gc_roots_top = 0;
 void **gc_roots[MAX_GC_ROOTS];
+int gc_roots_in_other_gens_top = 0;
+void **gc_roots_in_other_gens[MAX_GC_ROOTS];
 
 void *gc_from_space;
 void *gc_to_space;
@@ -41,6 +44,7 @@ void gc_collect();
 void gc_collect_all();
 void gc_collect_last_gen();
 void gc_clean_from_space();
+void gc_collect_roots();
 bool gc_is_pointer_in_to_space(void* ptr);
 bool gc_is_pointer_in_from_space(void* ptr);
 
@@ -74,11 +78,11 @@ void* gc_alloc(size_t size_in_bytes) {
   max_allocated_bytes = total_allocated_bytes;
   max_allocated_objects = total_allocated_objects;
 
-  if (gc_generations_next[0] > gc_from_space + MAX_ALLOC_SIZE) {
+  if (gc_generations_next[0] + size_in_bytes > gc_generations[0] + MAX_ALLOC_SIZE) {
       gc_collect_all();
   }
 
-  if (gc_generations_next[0] > gc_from_space + MAX_ALLOC_SIZE) {
+  if (gc_generations_next[0] + size_in_bytes > gc_generations[0] + MAX_ALLOC_SIZE) {
       printf("Out Of Memory!");
       exit(137);
   }
@@ -93,17 +97,18 @@ void* gc_alloc(size_t size_in_bytes) {
 void gc_collect_all() {
     gc_collect_last_gen();
 
-    for (int i = 0; i < GC_GEN_COUNT-1; i++) {
+    for (int i = GC_GEN_COUNT-1-1; i >= 0; i--) {
         gc_from_space = gc_generations[i];
         gc_to_space = gc_generations_next[i+1];
+        gc_to_space_next = gc_to_space;
+
+        gc_collect_roots();
 
         gc_collect();
 
-        gc_generations_next[i] = gc_generations[i];
-    }
+        gc_roots_in_other_gens_top = 0;
 
-    for (int i = 0; i < gc_roots_top; i++) {
-        assert(!gc_is_pointer_in_to_space(*gc_roots[i]));
+        gc_generations_next[i] = gc_generations[i];
     }
 }
 
@@ -113,8 +118,13 @@ void gc_collect_last_gen() {
 
     gc_from_space = last_gen_start;
     gc_to_space = gc_last_gen_alternative;
+    gc_to_space_next = gc_last_gen_alternative;
+
+    gc_collect_roots();
 
     gc_collect();
+
+    gc_roots_in_other_gens_top = 0;
     
     gc_generations_next[gen_idx] = gc_to_space_next;
 
@@ -142,7 +152,7 @@ void gc_chase(stella_object *ptr) {
     do {
         stella_object *q = gc_to_space_next;
         int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(ptr->object_header);
-        gc_to_space_next += fields_count * sizeof(void*) + sizeof(void *); // todo
+        gc_to_space_next += sizeof(stella_object) + fields_count * sizeof(void*); // todo
         void *r = NULL;
 
         q->object_header = ptr->object_header;
@@ -176,6 +186,11 @@ void gc_collect() {
         *root_ptr = gc_forward(*root_ptr);
     }
 
+    for (int root_i = 0; root_i < gc_roots_in_other_gens_top; root_i++) {
+        void **root_ptr = gc_roots_in_other_gens[root_i];
+        *root_ptr = gc_forward(*root_ptr);
+    }
+
     while (scan < gc_to_space_next) {
         stella_object *obj = scan;
         int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
@@ -203,6 +218,30 @@ void gc_clean_from_space() {
     }
 }
 
+void gc_collect_roots() {
+    for (int i = 0; i < GC_GEN_COUNT; i++) {
+        void* scan = gc_generations[i];
+
+        if (gc_is_pointer_in_from_space(scan)) {
+            continue;
+        }
+
+        while (scan < gc_generations_next[0]) {
+            stella_object *obj = scan;
+            int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
+
+            for (int field_i = 0; field_i < fields_count; field_i++) {
+                void *field_ptr = obj->object_fields[field_i];
+                if (gc_is_pointer_in_from_space(field_ptr)) {
+                    gc_roots_in_other_gens[gc_roots_in_other_gens_top++] = &obj->object_fields[field_i];
+                }
+            }
+
+            scan += sizeof(stella_object) + fields_count * sizeof(void*);
+        }
+    }
+}
+
 
 void print_gc_roots() {
   printf("ROOTS: ");
@@ -218,6 +257,12 @@ void print_gc_alloc_stats() {
   printf("Total memory use:        %'d reads and %'d writes\n", total_reads, total_writes);
   printf("Max GC roots stack size: %'d roots\n", gc_roots_max_size);
   printf("GC runs count:           %'zu\n", gc_runs_total);
+
+  for (int i = 0; i < GC_GEN_COUNT; i++) {
+      printf("gen %d:\n", i);
+      int max = (i + 1) == GC_GEN_COUNT ? 2 * MAX_ALLOC_SIZE : MAX_ALLOC_SIZE;
+      printf(" allocated %zu/%d\n", (gc_generations_next[i] - gc_generations[i]), max);
+  }
 }
 
 void print_gc_state() {

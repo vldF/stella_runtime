@@ -6,6 +6,39 @@
 #include "runtime.h"
 #include "gc.h"
 
+typedef struct gc_object gc_object;
+struct gc_object {
+    void *new_ptr;
+    stella_object obj;
+};
+
+struct gc_space {
+    size_t  size;
+    gc_object* start;
+    gc_object* next;
+};
+
+struct gc_gen_descriptor {
+    int idx;
+
+    gc_object * scan;
+
+    struct gc_space from;
+    struct gc_space to;
+};
+
+bool has_enough_space(const struct gc_space space, const size_t requested_size) {
+    return space.next + requested_size <= space.start + space.size;
+}
+
+#define GC_GEN_COUNT 2
+
+#define MAX_GC_ROOTS 1024
+#define MAX_ALLOC_SIZE (16 * 100)
+
+// for debug and testing
+//#define DISABLE_GC
+
 /** GC statistics **/
 size_t total_allocated_bytes = 0;
 int total_allocated_objects = 0;
@@ -18,35 +51,25 @@ long gc_runs_total = 0;
 int total_reads = 0;
 int total_writes = 0;
 
-#define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (16 * 200)
-#define GC_GEN_COUNT 2
-// +1 is for the last generation that is doubled
-
-//#define DISABLE_GC
-
 int gc_roots_max_size = 0;
 int gc_roots_top = 0;
 void **gc_roots[MAX_GC_ROOTS];
 int gc_roots_in_other_gens_top = 0;
 void **gc_roots_in_other_gens[MAX_GC_ROOTS];
 
-void *gc_from_space;
-void *gc_to_space;
-void *gc_to_space_next;
+struct gc_gen_descriptor gc_generations[GC_GEN_COUNT];
+bool was_heap_allocated = false;
 
-void *gc_generations[GC_GEN_COUNT];
-void *gc_last_gen_alternative;
-void *gc_generations_next[GC_GEN_COUNT];
-
-void gc_chase(stella_object *ptr);
-void gc_collect();
+void* gc_forward(struct gc_gen_descriptor gen, gc_object *ptr);
+void gc_chase(struct gc_gen_descriptor gen, gc_object *ptr);
+void gc_collect(struct gc_gen_descriptor gen);
 void gc_collect_all();
-void gc_collect_last_gen();
-void gc_clean_from_space();
-void gc_collect_roots();
-bool gc_is_pointer_in_to_space(void* ptr);
-bool gc_is_pointer_in_from_space(void* ptr);
+void gc_clean_space(struct gc_space);
+size_t gc_obj_size(gc_object*);
+bool gc_is_pointer_in_space(struct gc_space space, void* ptr);
+void init_generations();
+void* try_alloc(struct gc_gen_descriptor g, size_t size_bytes);
+struct gc_object* try_alloc_in_space(struct gc_space space, size_t size_bytes);
 
 #ifdef DISABLE_GC
 void* gc_alloc(size_t size_in_bytes) {
@@ -61,16 +84,8 @@ void* gc_alloc(size_t size_in_bytes) {
 
 #ifndef DISABLE_GC
 void* gc_alloc(size_t size_in_bytes) {
-    if (gc_generations[0] == NULL) {
-        size_t arena_size = MAX_ALLOC_SIZE * (GC_GEN_COUNT + 1); // +1 is for the last generation that is doubled
-        void *arena = malloc(arena_size);
-
-        for (size_t i = 0; i < GC_GEN_COUNT; i++) {
-            gc_generations[i] = arena + i * MAX_ALLOC_SIZE;
-            gc_generations_next[i] = gc_generations[i];
-        }
-
-        gc_last_gen_alternative = malloc(MAX_ALLOC_SIZE * 2); // the last on is doubled
+    if (!was_heap_allocated) {
+        init_generations();
     }
 
   total_allocated_bytes += size_in_bytes;
@@ -78,168 +93,160 @@ void* gc_alloc(size_t size_in_bytes) {
   max_allocated_bytes = total_allocated_bytes;
   max_allocated_objects = total_allocated_objects;
 
-  if (gc_generations_next[0] + size_in_bytes > gc_generations[0] + MAX_ALLOC_SIZE) {
+  gc_object* allocated = try_alloc(gc_generations[0], size_in_bytes);
+  if (allocated == NULL) {
       gc_collect_all();
+      allocated = try_alloc(gc_generations[0], size_in_bytes);
   }
 
-  if (gc_generations_next[0] + size_in_bytes > gc_generations[0] + MAX_ALLOC_SIZE) {
-      printf("Out Of Memory!");
+  if (allocated == NULL) {
+      printf("Out of memory");
       exit(137);
   }
 
-  void* result = gc_generations_next[0];
-  gc_generations_next[0] += size_in_bytes;
-
-  return result;
+  return &allocated->obj;
 }
+
 #endif
 
-void gc_collect_all() {
-    gc_collect_last_gen();
+void init_generations() {
+    size_t arena_size = MAX_ALLOC_SIZE * (GC_GEN_COUNT + 1); // +1 is because of last gen is being doubled
+    void *arena = malloc(arena_size);
 
-    for (int i = GC_GEN_COUNT-1-1; i >= 0; i--) {
-        gc_from_space = gc_generations[i];
-        gc_to_space = gc_generations_next[i+1];
-        gc_to_space_next = gc_to_space;
+    struct gc_space g0_from;
+    g0_from.start = arena;
+    g0_from.next = g0_from.start;
+    g0_from.size = MAX_ALLOC_SIZE;
 
-        gc_collect_roots();
+    struct gc_space g1_from;
+    g1_from.start = arena + MAX_ALLOC_SIZE;
+    g1_from.next = g1_from.start;
+    g1_from.size = MAX_ALLOC_SIZE;
 
-        gc_collect();
+    struct gc_space g0_to = g1_from;
 
-        gc_roots_in_other_gens_top = 0;
+    struct gc_space g1_to;
+    g1_to.start = g1_from.start + MAX_ALLOC_SIZE;
+    g1_to.next = g1_to.start;
+    g1_to.size = MAX_ALLOC_SIZE;
 
-        gc_generations_next[i] = gc_generations[i];
+    gc_generations[0].from = g0_from;
+    gc_generations[0].to = g0_to;
+    gc_generations[1].from = g1_from;
+    gc_generations[1].to = g1_to;
+}
+
+struct gc_object* try_alloc_in_space(struct gc_space space, size_t size_bytes) {
+    size_t size_with_wrapper = size_bytes + sizeof (void *);
+    if (!has_enough_space(space, size_with_wrapper)) {
+        return NULL;
     }
+
+    struct gc_object *result = space.next;
+    result->new_ptr = NULL;
+    space.next += size_with_wrapper;
+
+    return result;
 }
 
-void gc_collect_last_gen() {
-    int gen_idx = GC_GEN_COUNT - 1;
-    void *last_gen_start = gc_generations[gen_idx];
-
-    gc_from_space = last_gen_start;
-    gc_to_space = gc_last_gen_alternative;
-    gc_to_space_next = gc_last_gen_alternative;
-
-    gc_collect_roots();
-
-    gc_collect();
-
-    gc_roots_in_other_gens_top = 0;
-    
-    gc_generations_next[gen_idx] = gc_to_space_next;
-
-    gc_generations[gen_idx] = gc_last_gen_alternative;
-    gc_last_gen_alternative = last_gen_start;
+void gc_collect_all() {
+    gc_collect(gc_generations[0]);
 }
 
-
-void* gc_forward(stella_object* ptr) {
-    if (gc_is_pointer_in_from_space(ptr)) {
-        void *possibleNewObjectAddress = ptr->object_fields[0];
-        if (gc_is_pointer_in_to_space(possibleNewObjectAddress)) {
+// todo: check for OOM here
+void* gc_forward(struct gc_gen_descriptor gen, gc_object *ptr) {
+    if (gc_is_pointer_in_space(gen.from, ptr)) {
+        void *possibleNewObjectAddress = ptr->obj.object_fields[0];
+        if (gc_is_pointer_in_space(gen.to, possibleNewObjectAddress)) {
             return possibleNewObjectAddress;
         } else {
-            gc_chase(ptr);
-            assert(gc_is_pointer_in_to_space(ptr->object_fields[0]));
-            return ptr->object_fields[0];
+            gc_chase(gen, ptr);
+            assert(gc_is_pointer_in_space(gen.to, possibleNewObjectAddress));
+            return ptr->obj.object_fields[0];
         }
     }
 
     return ptr;
 }
 
-void gc_chase(stella_object *ptr) {
+void gc_chase(struct gc_gen_descriptor gen, gc_object *ptr) {
     do {
-        stella_object *q = gc_to_space_next;
-        int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(ptr->object_header);
-        gc_to_space_next += sizeof(stella_object) + fields_count * sizeof(void*); // todo
+        struct gc_object *q = try_alloc_in_space(gen.to, gc_obj_size(ptr));
+        // todo: check q for NULL here
+
+        int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(ptr->obj.object_header);
         void *r = NULL;
 
-        q->object_header = ptr->object_header;
+        q->obj.object_header = ptr->obj.object_header;
         for (int i = 0; i < fields_count; i++) {
-            q->object_fields[i] = ptr->object_fields[i];
+          q->obj.object_fields[i] = ptr->obj.object_fields[i];
 
-            stella_object *potentially_forwarded = q->object_fields[i];
-            if (gc_is_pointer_in_from_space(q->object_fields[i])
-                    && !gc_is_pointer_in_to_space(potentially_forwarded->object_fields[0])) {
+            if (gc_is_pointer_in_space(gen.from, q->obj.object_fields[i])) {
+              stella_object *potentially_forwarded = q->new_ptr;
+
+              if (!gc_is_pointer_in_space(gen.to, potentially_forwarded)) {
                 r = potentially_forwarded;
+              }
             }
         }
 
-        ptr->object_fields[0] = q;
+        ptr->new_ptr = q;
         ptr = r;
     } while(ptr != NULL);
 }
 
-void gc_collect() {
+void gc_collect(struct gc_gen_descriptor gen) {
     gc_runs_total++;
 
-//    size_t allocated_bytes = (gc_from_space_next - gc_from_space);
-//    if (allocated_bytes > max_allocated_bytes) {
-//        max_allocated_bytes = allocated_bytes;
-//    }
-
-    void* scan = gc_to_space;
+    gen.scan = gen.to.next;
 
     for (int root_i = 0; root_i < gc_roots_top; root_i++) {
         void **root_ptr = gc_roots[root_i];
-        *root_ptr = gc_forward(*root_ptr);
+        *root_ptr = gc_forward(gen, *root_ptr);
     }
 
     for (int root_i = 0; root_i < gc_roots_in_other_gens_top; root_i++) {
         void **root_ptr = gc_roots_in_other_gens[root_i];
-        *root_ptr = gc_forward(*root_ptr);
+        *root_ptr = gc_forward(gen, *root_ptr);
     }
 
-    while (scan < gc_to_space_next) {
-        stella_object *obj = scan;
+    for (int i = 0; i < gen.idx; i++) {
+      struct gc_gen_descriptor prev_gen = gc_generations[i];
+
+      for (gc_object *ptr = prev_gen.from.start; ptr < prev_gen.from.next; ptr += gc_obj_size(ptr)) {
+        int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(ptr->obj.object_header);
+        for (int field_i = 0; field_i < fields_count; field_i++) {
+          ptr->obj.object_fields[field_i] = gc_forward(gen, ptr->obj.object_fields[i]);
+        }
+      }
+    }
+
+    while (gen.scan < gen.to.next) {
+        stella_object *obj = &gen.scan->obj;
         int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
         for (int field_i = 0; field_i < fields_count; field_i++) {
-            obj->object_fields[field_i] = gc_forward(obj->object_fields[field_i]);
+            obj->object_fields[field_i] = gc_forward(gen, obj->object_fields[field_i]);
         }
 
-        scan += fields_count * sizeof(void*) + sizeof(void*);
+      gen.scan += gc_obj_size(gen.scan);
     }
 
-    gc_clean_from_space(); // todo: debug only
+  gc_clean_space(gen.from); // todo: debug only
 }
 
-bool gc_is_pointer_in_to_space(void* ptr) {
-    return ptr >= gc_to_space && ptr < (gc_to_space + MAX_ALLOC_SIZE);
-}
-
-bool gc_is_pointer_in_from_space(void* ptr) {
-    return ptr >= gc_from_space && ptr < (gc_from_space + MAX_ALLOC_SIZE);
-}
-
-void gc_clean_from_space() {
-    for (void* i = gc_from_space; i < gc_from_space + MAX_ALLOC_SIZE; i++) {
+void gc_clean_space(struct gc_space space) {
+    for (void* i = space.start; i < (void*)space.start + space.size; i++) {
         *(char *)i = 0;
     }
 }
 
-void gc_collect_roots() {
-    for (int i = 0; i < GC_GEN_COUNT; i++) {
-        void* scan = gc_generations[i];
-
-        if (gc_is_pointer_in_from_space(scan)) {
-            continue;
-        }
-
-        while (scan < gc_generations_next[0]) {
-            stella_object *obj = scan;
-            int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->object_header);
-
-            for (int field_i = 0; field_i < fields_count; field_i++) {
-                void *field_ptr = obj->object_fields[field_i];
-                if (gc_is_pointer_in_from_space(field_ptr)) {
-                    gc_roots_in_other_gens[gc_roots_in_other_gens_top++] = &obj->object_fields[field_i];
-                }
-            }
-
-            scan += sizeof(stella_object) + fields_count * sizeof(void*);
-        }
+void *try_alloc(struct gc_gen_descriptor g, size_t size_bytes) {
+    gc_object *allocated = try_alloc_in_space(g.from, size_bytes);
+    if (allocated == NULL) {
+        return NULL;
     }
+
+    return &allocated->obj;
 }
 
 
@@ -261,7 +268,7 @@ void print_gc_alloc_stats() {
   for (int i = 0; i < GC_GEN_COUNT; i++) {
       printf("gen %d:\n", i);
       int max = (i + 1) == GC_GEN_COUNT ? 2 * MAX_ALLOC_SIZE : MAX_ALLOC_SIZE;
-      printf(" allocated %zu/%d\n", (gc_generations_next[i] - gc_generations[i]), max);
+//      printf(" allocated %zu/%d\n", (gc_generations_next[i] - gc_generations[i]), max);
   }
 }
 
@@ -286,4 +293,15 @@ void gc_push_root(void **ptr){
 
 void gc_pop_root(void **ptr){
   gc_roots_top--;
+}
+
+size_t gc_obj_size(gc_object *obj) {
+  int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(obj->obj.object_header);
+
+  return (2 + fields_count) * sizeof (void*);
+}
+
+bool gc_is_pointer_in_space(struct gc_space space, void* ptr) {
+  void *startPtr = (void *) space.start;
+  return startPtr <= ptr && ptr < (startPtr + space.size);
 }

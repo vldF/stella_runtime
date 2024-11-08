@@ -16,4 +16,4 @@ add_executable(stella_runtime
         out.c)
 
 #add_compile_definitions(STELLA_DEBUG STELLA_GC_STATS STELLA_RUNTIME_STATS)
-add_compile_definitions(STELLA_GC_STATS STELLA_RUNTIME_STATS)
+#add_compile_definitions(STELLA_GC_STATS STELLA_RUNTIME_STATS)

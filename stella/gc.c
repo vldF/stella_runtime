@@ -31,10 +31,12 @@ bool has_enough_space(const struct gc_space *space, const size_t requested_size)
   return (space->next + requested_size) <= (space->start + space->size);
 }
 
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+
 #define GC_GEN_COUNT 2
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (24 * 128)
+#define MAX_ALLOC_SIZE (24 * 12)
 
 // for debug and testing
 //#define DISABLE_GC
@@ -46,7 +48,8 @@ int total_allocated_objects = 0;
 size_t max_allocated_bytes = 0;
 size_t max_allocated_objects = 0;
 
-long gc_runs_total = 0;
+long gc_runs[GC_GEN_COUNT] = { 0, 0 };
+size_t gc_max_allocated[GC_GEN_COUNT] = { 0, 0 };
 
 int total_reads = 0;
 int total_writes = 0;
@@ -167,6 +170,9 @@ struct gc_object *try_alloc_in_space(struct gc_space *space, size_t size_bytes) 
   result->obj.object_header = 0;
   space->next += size_with_wrapper;
 
+  size_t current_allocated = space->next - space->start;
+  gc_max_allocated[space->gen] = MAX(current_allocated, gc_max_allocated[space->gen]);
+
   return result;
 }
 
@@ -174,7 +180,6 @@ void gc_collect_all() {
   gc_collect(gc_generations[0]);
 }
 
-// todo: check for OOM here
 void *gc_forward(struct gc_gen_descriptor *gen, void *ptr) {
   if (gc_is_pointer_in_space(gen->from, ptr)) {
     struct gc_object *gc_obj = get_gc_object(ptr);
@@ -237,7 +242,7 @@ bool gc_chase(struct gc_gen_descriptor *gen, struct gc_object *ptr) {
 }
 
 void gc_collect(struct gc_gen_descriptor *gen) {
-  gc_runs_total++;
+  gc_runs[gen->idx]++;
 
   gen->scan = gen->to->next;
 
@@ -302,8 +307,8 @@ void gc_clean_space(struct gc_space *space) {
   }
 }
 
-void *try_alloc(struct gc_gen_descriptor *g, size_t size_bytes) {
-  struct gc_object *allocated = try_alloc_in_space(g->from, size_bytes);
+void *try_alloc(struct gc_gen_descriptor *gen, size_t size_bytes) {
+  struct gc_object *allocated = try_alloc_in_space(gen->from, size_bytes);
   if (allocated == NULL) {
     return NULL;
   }
@@ -320,22 +325,64 @@ void print_gc_roots() {
   printf("\n");
 }
 
+long gc_get_total_runs() {
+  long res = 0;
+  for (int i = 0; i < GC_GEN_COUNT; ++i) {
+    res += gc_runs[i];
+  }
+
+  return res;
+}
+
 void print_gc_alloc_stats() {
   printf("Total memory allocation: %'zu bytes (%'d objects)\n", total_allocated_bytes, total_allocated_objects);
   printf("Maximum residency:       %'zu bytes (%'zu objects)\n", max_allocated_bytes, max_allocated_objects);
   printf("Total memory use:        %'d reads and %'d writes\n", total_reads, total_writes);
   printf("Max GC roots stack size: %'d roots\n", gc_roots_max_size);
-  printf("GC runs count:           %'zu\n", gc_runs_total);
+  printf("GC total runs count:     %'zu\n", gc_get_total_runs());
 
   for (int i = 0; i < GC_GEN_COUNT; i++) {
     printf("gen %d:\n", i);
-    int max = (i + 1) == GC_GEN_COUNT ? 2 * MAX_ALLOC_SIZE : MAX_ALLOC_SIZE;
-//      printf(" allocated %zu/%d\n", (gc_generations_next[i] - gc_generations[i]), max);
+    printf(" GC runs count:          %'ld\n", gc_runs[i]);
+    printf(" gen max allocated:      %'ld\n", gc_max_allocated[i]);
   }
 }
 
 void print_gc_state() {
-  // TODO: not implemented
+  print_gc_roots();
+
+  printf("\n");
+
+  for (int i = 0; i < GC_GEN_COUNT; i++) {
+    struct gc_gen_descriptor *gen = gc_generations[i];
+    struct gc_space *space = gen->from;
+    printf("\n");
+    printf("===generation %d [from space from=%p to=%p]===\n", i, space->start, space->start + space->size);
+    printf(" space start=%p\n", space->start);
+    printf(" space next=%p\n", space->next);
+    printf(" gen scan=%p\n", gen->scan);
+    printf("\n");
+    printf("allocated %ld/%ld\n", (space->next - space->start), space->size);
+    printf("free %ld/%ld\n", space->size - (space->next - space->start), space->size);
+
+    void *scan = space->start;
+    size_t obj_idx = 0;
+    while (scan < space->next) {
+      printf("object #%ld %p\n", obj_idx++, scan);
+
+      printf(" GC object header: new_ptr = %p\n", ((struct gc_object*)scan)->new_ptr);
+
+      stella_object *s_obj = get_stella_object(scan);
+      int fields_count = STELLA_OBJECT_HEADER_FIELD_COUNT(s_obj->object_header);
+      for (int field_i = 0; field_i < fields_count; field_i++) {
+        printf(" field %d has ptr %p, it's value is ", field_i, s_obj->object_fields[i]);
+        print_stella_object(s_obj->object_fields[i]);
+        printf("\n");
+      }
+
+      scan += get_stella_obj_size(s_obj) + sizeof (void*);
+    }
+  }
 }
 
 void gc_read_barrier(void *object, int field_index) {

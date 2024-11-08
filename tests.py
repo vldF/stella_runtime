@@ -19,7 +19,6 @@ def compile(test_name: str, max_heap_size: int = 16 * 512):
         [
             "gcc",
             "-std=c11",
-            "-DMAX_ALLOC_SIZE="+str(max_heap_size),
             "test_out.c",
             "stella/runtime.c",
             "stella/gc.c",
@@ -101,6 +100,7 @@ def test_id():
     do_id_test(10)
     do_id_test(30)
     do_id_test(150)
+    do_id_test(320)
 
 
 def do_factorial_test(x):
@@ -118,6 +118,7 @@ def test_factorial():
     do_factorial_test(2)
     do_factorial_test(3)
     do_factorial_test(5)
+    do_factorial_test(10)
 
 
 if __name__ == "__main__":

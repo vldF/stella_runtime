@@ -34,7 +34,7 @@ bool has_enough_space(const struct gc_space *space, const size_t requested_size)
 #define GC_GEN_COUNT 2
 
 #define MAX_GC_ROOTS 1024
-#define MAX_ALLOC_SIZE (24 * 64)
+#define MAX_ALLOC_SIZE (24 * 128)
 
 // for debug and testing
 //#define DISABLE_GC
@@ -237,7 +237,6 @@ bool gc_chase(struct gc_gen_descriptor *gen, struct gc_object *ptr) {
 }
 
 void gc_collect(struct gc_gen_descriptor *gen) {
-  printf("collect in %d\n", gen->idx);
   gc_runs_total++;
 
   gen->scan = gen->to->next;

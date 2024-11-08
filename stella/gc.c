@@ -36,7 +36,9 @@ bool has_enough_space(const struct gc_space *space, const size_t requested_size)
 #define GC_GEN_COUNT 2
 
 #define MAX_GC_ROOTS 1024
+#ifndef MAX_ALLOC_SIZE
 #define MAX_ALLOC_SIZE (24 * 12)
+#endif
 
 // for debug and testing
 //#define DISABLE_GC

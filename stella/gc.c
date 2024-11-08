@@ -145,7 +145,7 @@ void init_generations() {
   g1_to.start = arena + g0_from.size + g1_from.size;
   g1_to.next = g1_to.start;
   g1_to.size = MAX_ALLOC_SIZE * 4;
-  g1_from.gen = 1;
+  g1_to.gen = 1;
 
   gc_generations[0]->from = &g0_from;
   gc_generations[0]->to = g0_to;
@@ -293,11 +293,7 @@ void gc_collect(struct gc_gen_descriptor *gen) {
     previous->to = gen->from;
     previous->scan = gen->from->start;
   } else {
-    struct gc_gen_descriptor *current = gc_generations[gen->from->gen];
-    struct gc_gen_descriptor *next = gc_generations[gen->to->gen];
-
-    current->from->next = gen->from->start;
-    current->to = next->from;
+    gen->from->next = gen->from->start;
   }
 }
 

@@ -41,6 +41,11 @@ sh ./run.sh ./testdata/fib.st -DSTELLA_DEBUG -DSTELLA_GC_STATS -DSTELLA_RUNTIME_
 
 see `./run.sh` for more details
 
+You can use `MAX_ALLOC_SIZE` macro to define the size of the first generation (288 bytes by default). Also, you can 
+define `MAX_GC_ROOTS` macro to set the maximum number of roots on a stack. You can define `DISABLE_GC` macro to disable
+the GC. In this case, the simpler allocator will be used. `GC_GEN_COUNT` allows you to set the number of generations
+to be used.
+
 
 ### Statistics
 
@@ -63,7 +68,8 @@ gen 1:
  gen max allocated:      424
 ```
 
-The first part contains basic memory statistics, the second one contains the statistics over generations
+The first part contains basic memory statistics, the second one contains the statistics over generations. For each
+generation it contains GC runs count and maximum allocated memory size. 
 
 #### print_gc_state
 
@@ -122,5 +128,8 @@ allocated 0/1152
 free 1152/1152
 ```
 
-The first paragraph contains current roots pointers. Then, information about each of 
-two generations is presented. 
+The first paragraph contains current roots pointers on a stack. Then, information about each of 
+two generations is presented. It contains start and end pointers of a generation, a pointer for the next allocation,
+the `scan` variable value. It also contains some information about each object in the generation currently presented.
+Each object's description contains `new_ptr` value shows the new position of the object after forwarding process. 
+Additionally, it contains the object pointer and its fields values. 

@@ -6,11 +6,13 @@
 #include "runtime.h"
 #include "gc.h"
 
+// descriptor for an object to store meta-information
 struct gc_object {
     void *new_ptr;
     stella_object obj;
 };
 
+// descriptor for a part of generation aka from- and to- spaces
 struct gc_space {
     int gen;
     size_t size;
@@ -18,6 +20,7 @@ struct gc_space {
     void *next;
 } g0_from, g1_from, g1_to;
 
+// descriptor for a generation
 struct gc_gen_descriptor {
     int idx;
 
@@ -27,6 +30,7 @@ struct gc_gen_descriptor {
     struct gc_space *to;
 } gc_gen0, gc_gen1;
 
+// do we have enough space to allocate a chunk of requested size?
 bool has_enough_space(const struct gc_space *space, const size_t requested_size) {
   return (space->next + requested_size) <= (space->start + space->size);
 }
@@ -105,12 +109,15 @@ void* gc_alloc(size_t size_in_bytes) {
 
 #ifndef DISABLE_GC
 
+// the main function to allocate some chunk in the heap
 void *gc_alloc(size_t size_in_bytes) {
   if (!was_heap_allocated) {
+    // lazy initialization of the heap
     was_heap_allocated = true;
     init_generations();
   }
 
+  // update statistics
   total_allocated_bytes += size_in_bytes;
   total_allocated_objects += 1;
   max_allocated_bytes = total_allocated_bytes;
@@ -118,6 +125,7 @@ void *gc_alloc(size_t size_in_bytes) {
 
   struct gc_object *allocated = try_alloc(gc_generations[0], size_in_bytes);
   if (allocated == NULL) {
+    // we can't allocate spase right now, try to collect a garbage
     gc_collect_first();
     allocated = try_alloc(gc_generations[0], size_in_bytes);
   }
@@ -134,6 +142,7 @@ void *gc_alloc(size_t size_in_bytes) {
 #endif
 
 void init_generations() {
+  // we store all generations in the same arena to improve debugging
   size_t whole_arena_size = MAX_ALLOC_SIZE + MAX_ALLOC_SIZE * 4 * 2;
   void *arena = malloc(whole_arena_size);
 
@@ -167,6 +176,7 @@ void init_generations() {
 struct gc_object *try_alloc_in_space(struct gc_space *space, size_t size_bytes) {
   size_t size_with_wrapper = size_bytes + sizeof(void *);
   if (!has_enough_space(space, size_with_wrapper)) {
+    // no enough space in the generation
     return NULL;
   }
 
@@ -186,6 +196,7 @@ void gc_collect_first() {
   gc_collect(gc_generations[0]);
 }
 
+// algorithm from the book to forward an object from the from generation to the to one
 void *gc_forward(struct gc_gen_descriptor *gen, void *ptr) {
   if (gc_is_pointer_in_space(gen->from, ptr)) {
     struct gc_object *gc_obj = gc_get_gc_object(ptr);
@@ -220,6 +231,7 @@ void *gc_forward(struct gc_gen_descriptor *gen, void *ptr) {
   return ptr;
 }
 
+// algorithm from the book to chase the objects from fields
 bool gc_chase(struct gc_gen_descriptor *gen, struct gc_object *ptr) {
   do {
     struct gc_object *q = try_alloc_in_space(gen->to, gc_get_stella_obj_size(&ptr->obj));
@@ -232,12 +244,15 @@ bool gc_chase(struct gc_gen_descriptor *gen, struct gc_object *ptr) {
 
     q->obj.object_header = ptr->obj.object_header;
     for (int i = 0; i < fields_count; i++) {
+      // chase all objects from fields
       q->obj.object_fields[i] = ptr->obj.object_fields[i];
 
       if (gc_is_pointer_in_space(gen->from, q->obj.object_fields[i])) {
+        // we need to forward the object
         struct gc_object *potentially_forwarded = gc_get_gc_object(q->obj.object_fields[i]);
 
         if (!gc_is_pointer_in_space(gen->to, potentially_forwarded->new_ptr)) {
+          // object was forwarded
           r = potentially_forwarded;
         }
       }
@@ -330,6 +345,7 @@ void gc_clean_space(struct gc_space *space) {
   }
 }
 
+// try to allocate a chunk of the size in the generation or return null
 void *try_alloc(struct gc_gen_descriptor *gen, size_t size_bytes) {
   struct gc_object *allocated = try_alloc_in_space(gen->from, size_bytes);
   if (allocated == NULL) {
@@ -339,7 +355,7 @@ void *try_alloc(struct gc_gen_descriptor *gen, size_t size_bytes) {
   return &allocated->obj;
 }
 
-
+// print the current GC roots on a stack
 void print_gc_roots() {
   printf("ROOTS: ");
   for (int i = 0; i < gc_roots_top; i++) {
@@ -348,6 +364,7 @@ void print_gc_roots() {
   printf("\n");
 }
 
+// calculate total GC runs count
 long gc_get_total_runs() {
   long res = 0;
   for (int i = 0; i < GC_GEN_COUNT; ++i) {
@@ -357,6 +374,7 @@ long gc_get_total_runs() {
   return res;
 }
 
+// print total GC stats
 void print_gc_alloc_stats() {
   printf("Total memory allocation: %'zu bytes (%'d objects)\n", total_allocated_bytes, total_allocated_objects);
   printf("Maximum residency:       %'zu bytes (%'zu objects)\n", max_allocated_bytes, max_allocated_objects);
@@ -371,6 +389,7 @@ void print_gc_alloc_stats() {
   }
 }
 
+// print current GC state
 void print_gc_state() {
   print_gc_roots();
 
@@ -408,11 +427,13 @@ void print_gc_state() {
   }
 }
 
+// read barrier
 void gc_read_barrier(void *object, int field_index) {
 //    assert(!gc_is_pointer_in_to_space(object));
   total_reads += 1;
 }
 
+// write barrier
 void gc_write_barrier(void *object, int field_index, void *contents) {
 //    assert(!gc_is_pointer_in_to_space(object));
   total_writes += 1;
@@ -421,11 +442,13 @@ void gc_write_barrier(void *object, int field_index, void *contents) {
   gc_roots_in_other_gens_top++;
 }
 
+// push a new root
 void gc_push_root(void **ptr) {
   gc_roots[gc_roots_top++] = ptr;
   if (gc_roots_top > gc_roots_max_size) { gc_roots_max_size = gc_roots_top; }
 }
 
+// pop the last root
 void gc_pop_root(void **ptr) {
   gc_roots_top--;
 }
@@ -446,10 +469,12 @@ size_t gc_get_stella_obj_size(stella_object *obj) {
   return (1 + field_count) * sizeof(void *);
 }
 
+// get pointer to GC wrapper of object by object ptr
 struct gc_object *gc_get_gc_object(void *st_ptr) {
   return st_ptr - sizeof(void *);
 }
 
+// get stella object by GC object wrapper
 stella_object *gc_get_stella_object(struct gc_object *gc_ptr) {
   return &gc_ptr->obj;
 }
